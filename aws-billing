@@ -30,6 +30,7 @@ BOX_MR="╣"
 
 # Default values
 PERIOD="month"  # month, week, or custom
+AWS_PROFILE_OPT=""  # Will be set to "--profile NAME" if specified
 
 show_help() {
     echo -e "${BOLD}Usage:${NC} aws-billing [OPTIONS]"
@@ -37,7 +38,7 @@ show_help() {
     echo "Display AWS billing costs for the current profile"
     echo ""
     echo -e "${BOLD}Options:${NC}"
-    echo "  -p, --period PERIOD   Time period: month (default), week, yesterday, or DAYS (number)"
+    echo "  -p, --profile NAME    AWS profile to use (default: current AWS_PROFILE)"
     echo "  -m, --mtd             Month-to-date costs (default)"
     echo "  -w, --week            Last 7 days costs"
     echo "  -y, --yesterday       Yesterday's costs"
@@ -49,12 +50,12 @@ show_help() {
     echo "  -h, --help            Show this help message"
     echo ""
     echo -e "${BOLD}Examples:${NC}"
-    echo "  aws-billing              # Show current month costs with EC2 details"
-    echo "  aws-billing -w           # Show last 7 days"
-    echo "  aws-billing -d 30        # Show last 30 days"
-    echo "  aws-billing -f           # Include forecast"
-    echo "  aws-billing --no-ec2     # Hide EC2 breakdown"
-    echo "  aws-billing -t 10        # Show top 10 services only"
+    echo "  aws-billing                     # Show current month costs"
+    echo "  aws-billing -p busuu-prod       # Show costs for busuu-prod profile"
+    echo "  aws-billing -p busuu-sandbox -w # Show last 7 days for sandbox"
+    echo "  aws-billing -d 30               # Show last 30 days"
+    echo "  aws-billing -f                  # Include forecast"
+    echo "  aws-billing --no-ec2            # Hide EC2 breakdown"
 }
 
 print_header() {
@@ -92,14 +93,14 @@ get_account_info() {
     local account_id
     local account_alias
     
-    account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null)
+    account_id=$(aws $AWS_PROFILE_OPT sts get-caller-identity --query 'Account' --output text 2>/dev/null)
     if [[ $? -ne 0 ]]; then
         echo ""
         return 1
     fi
     
     # Try to get account alias
-    account_alias=$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null)
+    account_alias=$(aws $AWS_PROFILE_OPT iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null)
     if [[ "$account_alias" == "None" ]] || [[ -z "$account_alias" ]]; then
         account_alias=""
     fi
@@ -143,7 +144,7 @@ get_costs_by_service() {
     local start_date="$1"
     local end_date="$2"
     
-    aws ce get-cost-and-usage \
+    aws $AWS_PROFILE_OPT ce get-cost-and-usage \
         --time-period Start="$start_date",End="$end_date" \
         --granularity MONTHLY \
         --metrics "UnblendedCost" \
@@ -155,7 +156,7 @@ get_total_cost() {
     local start_date="$1"
     local end_date="$2"
     
-    aws ce get-cost-and-usage \
+    aws $AWS_PROFILE_OPT ce get-cost-and-usage \
         --time-period Start="$start_date",End="$end_date" \
         --granularity MONTHLY \
         --metrics "UnblendedCost" \
@@ -173,7 +174,7 @@ get_forecast() {
     # Add one day to end_date for the API (it's exclusive)
     end_date=$(date -j -v+1d -f "%Y-%m-%d" "$end_date" +%Y-%m-%d 2>/dev/null || date -d "$end_date +1 day" +%Y-%m-%d)
     
-    aws ce get-cost-forecast \
+    aws $AWS_PROFILE_OPT ce get-cost-forecast \
         --time-period Start="$start_date",End="$end_date" \
         --metric UNBLENDED_COST \
         --granularity MONTHLY \
@@ -184,7 +185,7 @@ get_ec2_compute_breakdown() {
     local start_date="$1"
     local end_date="$2"
     
-    aws ce get-cost-and-usage \
+    aws $AWS_PROFILE_OPT ce get-cost-and-usage \
         --time-period Start="$start_date",End="$end_date" \
         --granularity MONTHLY \
         --metrics "UnblendedCost" \
@@ -197,7 +198,7 @@ get_ec2_other_breakdown() {
     local start_date="$1"
     local end_date="$2"
     
-    aws ce get-cost-and-usage \
+    aws $AWS_PROFILE_OPT ce get-cost-and-usage \
         --time-period Start="$start_date",End="$end_date" \
         --granularity MONTHLY \
         --metrics "UnblendedCost" \
@@ -298,21 +299,19 @@ for cat, cost in sorted_cats:
     echo -e "  ${CYAN}┌─ ${BOLD}${breakdown_title}${NC}"
     echo -e "  ${CYAN}│${NC}"
     
-    # Get max cost for bar scaling
-    local max_cat_cost
-    max_cat_cost=$(echo "$categorized_data" | head -1 | cut -d'|' -f1)
-    
     while IFS='|' read -r cost category; do
         local percentage
-        percentage=$(echo "scale=1; ($cost / $ec2_total) * 100" | bc 2>/dev/null || echo "0")
+        percentage=$(echo "scale=2; ($cost / $ec2_total) * 100" | bc 2>/dev/null || echo "0")
         local color
         color=$(color_for_cost "$cost")
         
-        # Create mini bar
+        # Create mini bar based on percentage (max 15 chars width)
         local bar_width=15
-        local filled=0
-        if (( $(echo "$max_cat_cost > 0" | bc -l) )); then
-            filled=$(echo "scale=0; ($cost / $max_cat_cost) * $bar_width" | bc)
+        local filled=$(echo "scale=0; ($percentage * $bar_width) / 100" | bc)
+        
+        # Ensure at least 1 block if percentage > 1%
+        if (( $(echo "$percentage > 1" | bc -l) )) && [[ $filled -lt 1 ]]; then
+            filled=1
         fi
         if [[ $filled -gt $bar_width ]]; then filled=$bar_width; fi
         if [[ $filled -lt 0 ]]; then filled=0; fi
@@ -352,16 +351,18 @@ color_for_cost() {
 }
 
 create_bar() {
-    local value="$1"
-    local max="$2"
+    local percentage="$1"
     local width=20
     
-    if (( $(echo "$max == 0" | bc -l) )); then
-        printf '%*s' $width ''
-        return
+    # Calculate filled blocks based on percentage (0-100)
+    # Multiply first, then divide to avoid truncation issues with bc
+    local filled=$(echo "scale=0; ($percentage * $width) / 100" | bc)
+    
+    # Ensure at least 1 block if percentage > 0.5%
+    if (( $(echo "$percentage > 0.5" | bc -l) )) && [[ $filled -lt 1 ]]; then
+        filled=1
     fi
     
-    local filled=$(echo "scale=0; ($value / $max) * $width" | bc)
     if [[ $filled -gt $width ]]; then
         filled=$width
     fi
@@ -419,10 +420,6 @@ for name, cost in services:
     # Calculate total
     total_cost=$(echo "$services" | awk -F'|' '{sum += $1} END {print sum}')
     
-    # Get max cost for bar chart scaling
-    local max_cost
-    max_cost=$(echo "$services" | head -1 | cut -d'|' -f1)
-    
     # Print header
     echo ""
     printf "  ${BOLD}%-40s %12s %8s  %-20s${NC}\n" "SERVICE" "COST (USD)" "%" "DISTRIBUTION"
@@ -436,11 +433,11 @@ for name, cost in services:
         fi
         
         local percentage
-        percentage=$(echo "scale=1; ($cost / $total_cost) * 100" | bc)
+        percentage=$(echo "scale=2; ($cost / $total_cost) * 100" | bc)
         local color
         color=$(color_for_cost "$cost")
         local bar
-        bar=$(create_bar "$cost" "$max_cost")
+        bar=$(create_bar "$percentage")
         
         # Store original service name for EC2 check
         local original_service="$service"
@@ -536,6 +533,7 @@ main() {
     local show_forecast=false
     local show_ec2_details=true
     local top_n=30
+    local custom_profile=""
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -544,8 +542,9 @@ main() {
                 show_help
                 exit 0
                 ;;
-            -p|--period)
-                period="$2"
+            -p|--profile)
+                custom_profile="$2"
+                AWS_PROFILE_OPT="--profile $2"
                 shift 2
                 ;;
             -m|--mtd)
@@ -590,7 +589,11 @@ main() {
     
     # Get current profile and account info
     local profile
-    profile=$(get_current_profile)
+    if [[ -n "$custom_profile" ]]; then
+        profile="$custom_profile"
+    else
+        profile=$(get_current_profile)
+    fi
     
     echo -e "\n${BOLD}${CYAN}☁ AWS Billing Dashboard${NC}"
     echo ""
