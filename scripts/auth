@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# auth - AWS authentication helper using okta-aws
+#
+
+# Define available profiles (account, role, profile_name, account_id)
+declare -a PROFILES=(
+    "chegg-aws-busuu-data-prod|BusuuOpsAdmin|busuu|331868046896"
+    "chegg-aws-busuu-prod|BusuuOpsAdmin|busuu-prod|526745048846"
+    "chegg-aws-busuu-nonprod|BusuuOpsAdmin|busuu-non-prod|841596778795"
+    "chegg-aws-busuu-sandbox|BusuuOpsAdmin|busuu-sandbox|543227299426"
+    "chegg-aws-busuu-verbling-nonprod|BusuuOpsAdmin|chegg-aws-busuu-verbling-nonprod|852617132818"
+    "chegg-aws-busuu-verbling-prod|BusuuOpsAdmin|verbling|614942315762"
+)
+
+show_help() {
+    echo "Usage: auth [OPTIONS]"
+    echo ""
+    echo "Authenticate to AWS accounts using Okta SSO"
+    echo ""
+    echo "Options:"
+    echo "  -l, --list     List available AWS profiles"
+    echo "  -p, --profile  Authenticate only a specific profile"
+    echo "  -h, --help     Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  auth              # Authenticate all profiles"
+    echo "  auth -l           # List available profiles"
+    echo "  auth -p busuu     # Authenticate only 'busuu' profile"
+}
+
+list_profiles() {
+    echo "Available AWS Profiles:"
+    echo ""
+    printf "%-35s %-15s %-35s %s\n" "ACCOUNT" "ROLE" "PROFILE" "ACCOUNT_ID"
+    printf "%-35s %-15s %-35s %s\n" "-------" "----" "-------" "----------"
+    for entry in "${PROFILES[@]}"; do
+        IFS='|' read -r account role profile account_id <<< "$entry"
+        printf "%-35s %-15s %-35s %s\n" "$account" "$role" "$profile" "$account_id"
+    done
+}
+
+authenticate_all() {
+    echo "Authenticating all AWS profiles..."
+    echo ""
+    for entry in "${PROFILES[@]}"; do
+        IFS='|' read -r account role profile account_id <<< "$entry"
+        echo -e "→ Authenticating: \033[1;33m$profile\033[0m ($account_id)"
+        okta-aws "$account" "$role" "$profile"
+        echo ""
+    done
+    echo ""
+    echo "Done! All profiles authenticated."
+}
+
+authenticate_profile() {
+    local target_profile="$1"
+    for entry in "${PROFILES[@]}"; do
+        IFS='|' read -r account role profile account_id <<< "$entry"
+        if [[ "$profile" == "$target_profile" ]]; then
+            echo -e "→ Authenticating: \033[1;33m$profile\033[0m ($account_id)"
+            okta-aws "$account" "$role" "$profile"
+            return 0
+        fi
+    done
+    echo "Error: Profile '$target_profile' not found."
+    echo "Use 'auth -l' to see available profiles."
+    return 1
+}
+
+# Parse arguments
+case "$1" in
+    -l|--list)
+        list_profiles
+        ;;
+    -p|--profile)
+        if [[ -z "$2" ]]; then
+            echo "Error: --profile requires a profile name"
+            exit 1
+        fi
+        authenticate_profile "$2"
+        ;;
+    -h|--help)
+        show_help
+        ;;
+    "")
+        authenticate_all
+        ;;
+    *)
+        echo "Unknown option: $1"
+        show_help
+        exit 1
+        ;;
+esac
