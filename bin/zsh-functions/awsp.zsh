@@ -48,14 +48,18 @@ awsp() {
             echo "Usage: awsp [PROFILE]"
             echo "\nSet the default AWS profile persistently\n"
             echo "Options:"
+            echo "  list            List available profiles (current marked with *)"
             echo "  -u, --unset     Remove default profile"
             echo "  -h, --help      Show this help message"
             echo "\nExamples:"
-            echo "  awsp              # List profiles (current marked with *)"
-            echo "  awsp busuu-prod   # Switch to busuu-prod"
+            echo "  awsp list        # List profiles"
+            echo "  awsp busuu-prod  # Switch to busuu-prod"
+            ;;
+        list)
+            _awsp_list
             ;;
         "")
-            _awsp_list
+            awsp -h
             ;;
         -*)
             echo "Unknown option: $1"

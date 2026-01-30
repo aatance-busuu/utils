@@ -32,10 +32,40 @@ BOX_MR="╣"
 PERIOD="month"  # month, week, or custom
 AWS_PROFILE_OPT=""  # Will be set to "--profile NAME" if specified
 
+# Format: profile|account_id (same as awsp)
+AWS_BILLING_PROFILES=(
+    "busuu|331868046896"
+    "busuu-prod|526745048846"
+    "busuu-non-prod|841596778795"
+    "busuu-sandbox|543227299426"
+    "chegg-aws-busuu-verbling-nonprod|852617132818"
+    "verbling|614942315762"
+)
+
+list_profiles() {
+    local current
+    current=$(get_current_profile)
+    echo -e "AWS Profiles:\n"
+    printf "  %-3s %-35s %s\n" "" "PROFILE" "ACCOUNT_ID"
+    printf "  %-3s %-35s %s\n" "" "-------" "----------"
+    for entry in "${AWS_BILLING_PROFILES[@]}"; do
+        local profile="${entry%%|*}"
+        local account_id="${entry##*|}"
+        if [[ "$profile" == "$current" ]]; then
+            printf "  ${GREEN}*${NC} ${YELLOW}%-35s${NC} %s\n" "$profile" "$account_id"
+        else
+            printf "    %-35s %s\n" "$profile" "$account_id"
+        fi
+    done
+}
+
 show_help() {
     echo -e "${BOLD}Usage:${NC} aws-billing [OPTIONS]"
     echo ""
     echo "Display AWS billing costs for the current profile"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo "  list                List available AWS profiles (current marked with *)"
     echo ""
     echo -e "${BOLD}Options:${NC}"
     echo "  -p, --profile NAME    AWS profile to use (default: current AWS_PROFILE)"
@@ -50,7 +80,8 @@ show_help() {
     echo "  -h, --help            Show this help message"
     echo ""
     echo -e "${BOLD}Examples:${NC}"
-    echo "  aws-billing                     # Show current month costs"
+    echo "  aws-billing                     # Show help"
+    echo "  aws-billing list                # List available profiles"
     echo "  aws-billing -p busuu-prod       # Show costs for busuu-prod profile"
     echo "  aws-billing -p busuu-sandbox -w # Show last 7 days for sandbox"
     echo "  aws-billing -d 30               # Show last 30 days"
@@ -534,6 +565,18 @@ main() {
     local show_ec2_details=true
     local top_n=30
     local custom_profile=""
+    
+    # No args: show help
+    if [[ $# -eq 0 ]]; then
+        show_help
+        exit 0
+    fi
+    
+    # "list" subcommand: show profiles and exit
+    if [[ "$1" == "list" ]]; then
+        list_profiles
+        exit 0
+    fi
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do

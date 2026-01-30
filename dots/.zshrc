@@ -38,7 +38,7 @@ export EDITOR='nvim'
 source $HOME/.aliases
 
 # Load custom functions
-for func in $HOME/.zsh/functions/*.zsh; do
+for func in $HOME/bin/zsh-functions/*.zsh; do
     [[ -f "$func" ]] && source "$func"
 done
 
