@@ -5,7 +5,7 @@
 # Shows detailed billing information for the current AWS profile
 #
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"/lib-aws-billing
 
 # Colors
 YELLOW='\033[1;33m'
