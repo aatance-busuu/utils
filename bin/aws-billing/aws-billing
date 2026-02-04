@@ -94,6 +94,7 @@ show_help() {
     echo "  --no-rds              Hide detailed RDS breakdown"
     echo "  --show-all            Show all services (including under \$1, no top limit)"
     echo "  -t, --top N           Show top N services (default: 15)"
+    echo "  --threshold N         Emit warning to stderr when total % of budget >= N (e.g. 70)"
     echo "  --simple-output       Use simple box characters (┌ │ ─) for better display in CI/bots"
     echo "  -h, --help            Show this help message"
     echo ""
@@ -432,6 +433,7 @@ display_costs() {
     local profile="${6:-}"
     local show_all="${7:-false}"
     local show_rds_details="${8:-true}"
+    local threshold="${9:-0}"
     local budget
     budget=$(get_budget_for_profile "$profile")
     if [[ -z "$budget" ]] || [[ "$budget" -eq 0 ]]; then
@@ -543,6 +545,12 @@ display_costs() {
     local total_bar_budget
     total_bar_budget=$(create_bar "$total_bar_pct")
     printf "  ${BOLD}%-40s${NC} ${total_color}${BOLD}%12.2f${NC} %6.1f%%  ${BLUE}%s${NC}  %6.1f%%  ${BLUE}%s${NC}\n" "TOTAL" "$total_cost" "100.0" "$(create_bar 100)" "$total_pct_budget" "$total_bar_budget"
+
+    if [[ -n "$threshold" ]] && [[ "$threshold" -gt 0 ]] && [[ -n "$total_pct_budget" ]]; then
+        if (( $(echo "$total_pct_budget >= $threshold" | bc -l 2>/dev/null) )); then
+            echo "\n${YELLOW}WARNING:${NC} exceeded ${threshold}% of the budget (current: ${total_pct_budget}%)" >&2
+        fi
+    fi
 }
 
 display_forecast() {
@@ -580,7 +588,8 @@ main() {
     local custom_profile=""
     local simple_output=false
     local show_all=false
-    
+    local threshold=0
+
     # No args: show help
     if [[ $# -eq 0 ]]; then
         show_help
@@ -648,6 +657,10 @@ main() {
             --simple-output)
                 simple_output=true
                 shift
+                ;;
+            --threshold)
+                threshold="$2"
+                shift 2
                 ;;
             *)
                 echo -e "${RED}Unknown option:${NC} $1"
@@ -719,7 +732,7 @@ main() {
         exit 1
     fi
     
-    display_costs "$cost_data" "$top_n" "$start_date" "$end_date" "$show_ec2_details" "$profile" "$show_all" "$show_rds_details"
+    display_costs "$cost_data" "$top_n" "$start_date" "$end_date" "$show_ec2_details" "$profile" "$show_all" "$show_rds_details" "$threshold"
     
     # Show forecast if requested
     if [[ "$show_forecast" == true ]]; then
