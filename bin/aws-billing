@@ -332,7 +332,6 @@ for cat, cost in sorted_cats:
     
     local hchar="${SEPARATOR_CHAR:-─}"
     echo -e "  ${CYAN}┌${hchar} ${BOLD}${breakdown_title}${NC}"
-    echo -e "  ${CYAN}│${NC}"
     
     while IFS='|' read -r cost category; do
         local percentage
@@ -488,14 +487,14 @@ for name, cost in services:
         if [[ "$original_service" == "EC2 - Other" ]] && [[ "$show_ec2_details" == true ]]; then
             local ec2_other_data
             ec2_other_data=$(get_ec2_other_breakdown "$start_date" "$end_date")
-            display_ec2_breakdown "$ec2_other_data" "$cost" "EC2 Infrastructure Breakdown"
+            display_ec2_breakdown "$ec2_other_data" "$cost" "EC2 - Other Breakdown"
         fi
         
         # Show EC2-Compute breakdown (instances)
         if [[ "$original_service" == "Amazon Elastic Compute Cloud - Compute" ]] && [[ "$show_ec2_details" == true ]]; then
             local ec2_compute_data
             ec2_compute_data=$(get_ec2_compute_breakdown "$start_date" "$end_date")
-            display_ec2_breakdown "$ec2_compute_data" "$cost" "EC2 Instances Breakdown"
+            display_ec2_breakdown "$ec2_compute_data" "$cost" "Amazon Elastic Compute Cloud - Compute Breakdown"
         fi
         
         ((count++))
