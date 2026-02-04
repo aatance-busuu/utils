@@ -5,6 +5,8 @@
 # Shows detailed billing information for the current AWS profile
 #
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Colors
 YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
@@ -31,6 +33,19 @@ BOX_MR="╣"
 # Default values
 PERIOD="month"  # month, week, or custom
 AWS_PROFILE_OPT=""  # Will be set to "--profile NAME" if specified
+
+# Budget in USD per profile for "% BUDGET" column
+get_budget_for_profile() {
+    case "$1" in
+        busuu-prod) echo 40000 ;;
+        busuu-non-prod) echo 7000 ;;
+        busuu) echo 25000 ;;
+        busuu-sandbox) echo 800 ;;
+        chegg-aws-busuu-verbling-nonprod) echo 1200 ;;
+        verbling) echo 8000 ;;
+        *) echo 0 ;;
+    esac
+}
 
 # Format: profile|account_id (same as awsp)
 AWS_BILLING_PROFILES=(
@@ -76,6 +91,8 @@ show_help() {
     echo "  -f, --forecast        Include month-end forecast"
     echo "  -e, --ec2             Show detailed EC2 breakdown (default: enabled)"
     echo "  --no-ec2              Hide detailed EC2 breakdown"
+    echo "  --no-rds              Hide detailed RDS breakdown"
+    echo "  --show-all            Show all services (including under \$1, no top limit)"
     echo "  -t, --top N           Show top N services (default: 15)"
     echo "  --simple-output       Use simple box characters (┌ │ ─) for better display in CI/bots"
     echo "  -h, --help            Show this help message"
@@ -88,6 +105,8 @@ show_help() {
     echo "  aws-billing -d 30               # Show last 30 days"
     echo "  aws-billing -f                  # Include forecast"
     echo "  aws-billing --no-ec2            # Hide EC2 breakdown"
+    echo "  aws-billing --no-rds            # Hide RDS breakdown"
+    echo "  aws-billing --show-all          # Show all services (including under \$1)"
     echo "  aws-billing --simple-output     # Use simple box chars (e.g. for GitHub comments)"
 }
 
@@ -103,8 +122,9 @@ print_header() {
 }
 
 print_separator() {
+    local width="${1:-72}"
     local char="${SEPARATOR_CHAR:-─}"
-    echo -e "${GRAY}$(printf '%72s' '' | tr ' ' "$char")${NC}"
+    echo -e "${GRAY}$(printf '%*s' "$width" '' | tr ' ' "$char")${NC}"
 }
 
 format_currency() {
@@ -241,6 +261,19 @@ get_ec2_other_breakdown() {
         --output json 2>/dev/null
 }
 
+get_rds_breakdown() {
+    local start_date="$1"
+    local end_date="$2"
+    
+    aws $AWS_PROFILE_OPT ce get-cost-and-usage \
+        --time-period Start="$start_date",End="$end_date" \
+        --granularity MONTHLY \
+        --metrics "UnblendedCost" \
+        --filter '{"Dimensions": {"Key": "SERVICE", "Values": ["Amazon Relational Database Service"]}}' \
+        --group-by Type=DIMENSION,Key=USAGE_TYPE \
+        --output json 2>/dev/null
+}
+
 display_ec2_breakdown() {
     local json_data="$1"
     local ec2_total="$2"
@@ -250,87 +283,16 @@ display_ec2_breakdown() {
         return
     fi
     
-    # Parse EC2 usage types and categorize using Python (avoids bash associative arrays)
     local categorized_data
-    categorized_data=$(echo "$json_data" | python3 -c "
-import sys
-import json
-import re
-
-def categorize_ec2_usage(usage_type):
-    # Extract instance type pattern
-    instance_pattern = r'[a-z][0-9]+[a-z]*\.[a-z0-9]+'
-    
-    if 'BoxUsage' in usage_type or 'HostBoxUsage' in usage_type:
-        match = re.search(instance_pattern, usage_type)
-        if match:
-            return f'EC2 Instance ({match.group()})'
-        return 'EC2 Instances'
-    elif 'SpotUsage' in usage_type:
-        match = re.search(instance_pattern, usage_type)
-        if match:
-            return f'Spot Instance ({match.group()})'
-        return 'Spot Instances'
-    elif 'EBS:VolumeUsage' in usage_type or 'EBS:Volume' in usage_type:
-        # Check for volume type
-        if 'gp3' in usage_type:
-            return 'EBS Volumes (gp3)'
-        elif 'gp2' in usage_type:
-            return 'EBS Volumes (gp2)'
-        elif 'io1' in usage_type or 'io2' in usage_type:
-            return 'EBS Volumes (io1/io2)'
-        return 'EBS Volumes'
-    elif 'EBS:Snapshot' in usage_type:
-        return 'EBS Snapshots'
-    elif 'VolumeIOUsage' in usage_type or 'IOPS' in usage_type:
-        return 'EBS IOPS'
-    elif 'DataTransfer' in usage_type and ('In-Bytes' in usage_type):
-        return 'Data Transfer In'
-    elif 'DataTransfer' in usage_type and ('Out-Bytes' in usage_type):
-        return 'Data Transfer Out'
-    elif 'DataTransfer' in usage_type or 'InterZone' in usage_type:
-        return 'Data Transfer (Regional)'
-    elif 'ElasticIP' in usage_type or 'IdleAddress' in usage_type:
-        return 'Elastic IPs'
-    elif 'NatGateway' in usage_type:
-        if 'Hours' in usage_type:
-            return 'NAT Gateway (Hours)'
-        elif 'Bytes' in usage_type:
-            return 'NAT Gateway (Data)'
-        return 'NAT Gateway'
-    elif 'LoadBalancer' in usage_type or 'LCU' in usage_type:
-        return 'Load Balancer'
-    elif 'CW:' in usage_type:
-        return 'CloudWatch (EC2)'
-    elif 'CPUCredits' in usage_type:
-        return 'CPU Credits'
-    else:
-        # Clean up and return
-        cleaned = re.sub(r'^[A-Z][A-Z0-9]*-', '', usage_type)
-        return cleaned[:35] if len(cleaned) > 35 else cleaned
-
-data = json.load(sys.stdin)
-categories = {}
-
-for result in data.get('ResultsByTime', []):
-    for group in result.get('Groups', []):
-        usage_type = group['Keys'][0]
-        cost = float(group['Metrics']['UnblendedCost']['Amount'])
-        if cost > 0.01:
-            category = categorize_ec2_usage(usage_type)
-            categories[category] = categories.get(category, 0) + cost
-
-# Sort by cost descending and print top 10
-sorted_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:10]
-for cat, cost in sorted_cats:
-    print(f'{cost:.4f}|{cat}')
-" 2>/dev/null)
+    categorized_data=$(echo "$json_data" | python3 "$SCRIPT_DIR/ec2_breakdown.py" 2>/dev/null)
     
     if [[ -z "$categorized_data" ]]; then
         return
     fi
     
     local hchar="${SEPARATOR_CHAR:-─}"
+    # Align with main table: "  │   " (6) + category (36) = 42, then space = cost at 43 (same as main)
+    local cat_width=36
     echo -e "  ${CYAN}┌${hchar} ${BOLD}${breakdown_title}${NC}"
     
     while IFS='|' read -r cost category; do
@@ -339,11 +301,8 @@ for cat, cost in sorted_cats:
         local color
         color=$(color_for_cost "$cost")
         
-        # Create mini bar based on percentage (max 15 chars width)
-        local bar_width=15
+        local bar_width=12
         local filled=$(echo "scale=0; ($percentage * $bar_width) / 100" | bc)
-        
-        # Ensure at least 1 block if percentage > 1%
         if (( $(echo "$percentage > 1" | bc -l) )) && [[ $filled -lt 1 ]]; then
             filled=1
         fi
@@ -354,17 +313,66 @@ for cat, cost in sorted_cats:
         for ((i=0; i<filled; i++)); do bar+="▓"; done
         for ((i=filled; i<bar_width; i++)); do bar+="░"; done
         
-        # Truncate category name if too long
         local display_cat="$category"
-        if [[ ${#display_cat} -gt 30 ]]; then
-            display_cat="${display_cat:0:27}..."
+        if [[ ${#display_cat} -gt $cat_width ]]; then
+            display_cat="${display_cat:0:$((cat_width-3))}..."
         fi
         
-        printf "  ${CYAN}│${NC}   %-32s ${color}%10.2f${NC} %6.1f%%  ${MAGENTA}%s${NC}\n" "$display_cat" "$cost" "$percentage" "$bar"
+        printf "  ${CYAN}│${NC}   %-36s ${color}%12.2f${NC} %6.1f%%  ${MAGENTA}%s${NC}\n" "$display_cat" "$cost" "$percentage" "$bar"
         
     done <<< "$categorized_data"
     
-    echo -e "  ${CYAN}└$(printf '%65s' '' | tr ' ' "$hchar")${NC}"
+    echo -e "  ${CYAN}└$(printf '%76s' '' | tr ' ' "$hchar")┘${NC}"
+}
+
+display_rds_breakdown() {
+    local json_data="$1"
+    local rds_total="$2"
+    local breakdown_title="$3"
+    
+    if [[ -z "$json_data" ]] || [[ "$json_data" == "null" ]]; then
+        return
+    fi
+    
+    local categorized_data
+    categorized_data=$(echo "$json_data" | python3 "$SCRIPT_DIR/rds_breakdown.py" 2>/dev/null)
+    
+    if [[ -z "$categorized_data" ]]; then
+        return
+    fi
+    
+    local hchar="${SEPARATOR_CHAR:-─}"
+    local cat_width=36
+    echo -e "  ${CYAN}┌${hchar} ${BOLD}${breakdown_title}${NC}"
+    
+    while IFS='|' read -r cost category; do
+        local percentage
+        percentage=$(echo "scale=2; ($cost / $rds_total) * 100" | bc 2>/dev/null || echo "0")
+        local color
+        color=$(color_for_cost "$cost")
+        
+        local bar_width=12
+        local filled=$(echo "scale=0; ($percentage * $bar_width) / 100" | bc)
+        if (( $(echo "$percentage > 1" | bc -l) )) && [[ $filled -lt 1 ]]; then
+            filled=1
+        fi
+        if [[ $filled -gt $bar_width ]]; then filled=$bar_width; fi
+        if [[ $filled -lt 0 ]]; then filled=0; fi
+        
+        local bar=""
+        for ((i=0; i<filled; i++)); do bar+="▓"; done
+        for ((i=filled; i<bar_width; i++)); do bar+="░"; done
+        
+        local display_cat="$category"
+        if [[ ${#display_cat} -gt $cat_width ]]; then
+            display_cat="${display_cat:0:$((cat_width-3))}..."
+        fi
+        
+        printf "  ${CYAN}│${NC}   %-36s ${color}%12.2f${NC} %6.1f%%  ${MAGENTA}%s${NC}\n" "$display_cat" "$cost" "$percentage" "$bar"
+        
+    done <<< "$categorized_data"
+    
+    echo -e "  ${CYAN}└$(printf '%76s' '' | tr ' ' "$hchar")┘${NC}"
 }
 
 color_for_cost() {
@@ -386,7 +394,7 @@ color_for_cost() {
 
 create_bar() {
     local percentage="$1"
-    local width=20
+    local width=12
     
     # Calculate filled blocks based on percentage (0-100)
     # Multiply first, then divide to avoid truncation issues with bc
@@ -421,57 +429,67 @@ display_costs() {
     local start_date="$3"
     local end_date="$4"
     local show_ec2_details="$5"
+    local profile="${6:-}"
+    local show_all="${7:-false}"
+    local show_rds_details="${8:-true}"
+    local budget
+    budget=$(get_budget_for_profile "$profile")
+    if [[ -z "$budget" ]] || [[ "$budget" -eq 0 ]]; then
+        budget=1
+    fi
     local total_cost=0
     
-    # Parse and sort services by cost
+    # Parse and sort services by cost (only show services > \$1 unless --show-all; count the rest for message)
+    if [[ "$show_all" == true ]]; then
+        export SHOW_ALL=1
+    else
+        unset SHOW_ALL 2>/dev/null || true
+    fi
+    local python_output
+    python_output=$(echo "$json_data" | python3 "$SCRIPT_DIR/services_parse.py" 2>/dev/null)
+    unset SHOW_ALL 2>/dev/null || true
+
     local services
-    services=$(echo "$json_data" | python3 -c "
-import sys
-import json
+    local under_1_count=0
+    if [[ -n "$python_output" ]]; then
+        under_1_count=$(echo "$python_output" | head -1 | sed 's/UNDER_1_COUNT://')
+        services=$(echo "$python_output" | tail -n +2)
+    fi
 
-data = json.load(sys.stdin)
-services = []
-
-for result in data.get('ResultsByTime', []):
-    for group in result.get('Groups', []):
-        service_name = group['Keys'][0]
-        cost = float(group['Metrics']['UnblendedCost']['Amount'])
-        if cost > 0.001:  # Filter out negligible costs
-            services.append((service_name, cost))
-
-# Sort by cost descending
-services.sort(key=lambda x: x[1], reverse=True)
-
-for name, cost in services:
-    print(f'{cost:.4f}|{name}')
-" 2>/dev/null)
-    
     if [[ -z "$services" ]]; then
         echo -e "${YELLOW}No cost data found for this period${NC}"
         return
     fi
     
-    # Calculate total
+    # Calculate total (only from displayed services, i.e. > \$1)
     total_cost=$(echo "$services" | awk -F'|' '{sum += $1} END {print sum}')
     
-    # Print header
+    # Print header: SERVICE(40) COST(12) "% DISTRIBUTION"(29) "% BUDGET"(30)
     echo ""
-    printf "  ${BOLD}%-40s %12s %8s  %-20s${NC}\n" "SERVICE" "COST (USD)" "%" "DISTRIBUTION"
-    print_separator
+    printf "  ${BOLD}%-40s %12s %21s %22s${NC}\n" "SERVICE" "COST (USD)" "% DISTRIBUTION" "% BUDGET"
+    print_separator 102
     
-    # Print services
+    # Print services (all if show_all, else top_n)
     local count=0
     while IFS='|' read -r cost service; do
-        if [[ $count -ge $top_n ]]; then
+        if [[ "$show_all" != true ]] && [[ $count -ge $top_n ]]; then
             break
         fi
         
         local percentage
         percentage=$(echo "scale=2; ($cost / $total_cost) * 100" | bc)
+        local pct_budget
+        pct_budget=$(echo "scale=2; ($cost / $budget) * 100" | bc)
         local color
         color=$(color_for_cost "$cost")
         local bar
         bar=$(create_bar "$percentage")
+        local bar_pct_budget="$pct_budget"
+        if (( $(echo "$pct_budget > 100" | bc -l 2>/dev/null) )); then
+            bar_pct_budget="100"
+        fi
+        local bar_budget
+        bar_budget=$(create_bar "$bar_pct_budget")
         
         # Store original service name for EC2 check
         local original_service="$service"
@@ -481,7 +499,7 @@ for name, cost in services:
             service="${service:0:35}..."
         fi
         
-        printf "  %-40s ${color}%12.2f${NC} %7.1f%%  ${BLUE}%s${NC}\n" "$service" "$cost" "$percentage" "$bar"
+        printf "  %-40s ${color}%12.2f${NC} %6.1f%%  ${BLUE}%s${NC}  %6.1f%%  ${BLUE}%s${NC}\n" "$service" "$cost" "$percentage" "$bar" "$pct_budget" "$bar_budget"
         
         # Show EC2-Other breakdown (NAT Gateway, EBS, etc.)
         if [[ "$original_service" == "EC2 - Other" ]] && [[ "$show_ec2_details" == true ]]; then
@@ -497,22 +515,34 @@ for name, cost in services:
             display_ec2_breakdown "$ec2_compute_data" "$cost" "Amazon Elastic Compute Cloud - Compute Breakdown"
         fi
         
+        # Show RDS breakdown (by usage type: instance, storage, backup, I/O, etc.)
+        if [[ "$original_service" == "Amazon Relational Database Service" ]] && [[ "$show_rds_details" == true ]]; then
+            local rds_data
+            rds_data=$(get_rds_breakdown "$start_date" "$end_date")
+            display_rds_breakdown "$rds_data" "$cost" "RDS Breakdown"
+        fi
+        
         ((count++))
     done <<< "$services"
     
-    # Show remaining count if there are more services
-    local total_services
-    total_services=$(echo "$services" | wc -l | tr -d ' ')
-    if [[ $total_services -gt $top_n ]]; then
-        local remaining=$((total_services - top_n))
-        echo -e "  ${DIM}... and $remaining more services${NC}"
+    # Show count of services with less than \$1 spent (not displayed, unless --show-all)
+    if [[ "$show_all" != true ]] && [[ -n "$under_1_count" ]] && [[ "$under_1_count" -gt 0 ]]; then
+        echo -e "  ${DIM}... and $under_1_count more services with less than \$1 spent${NC}"
     fi
     
     # Print total
-    print_separator
+    print_separator 102
     local total_color
     total_color=$(color_for_cost "$total_cost")
-    printf "  ${BOLD}%-40s${NC} ${total_color}${BOLD}%12.2f${NC}\n" "TOTAL" "$total_cost"
+    local total_pct_budget
+    total_pct_budget=$(echo "scale=2; ($total_cost / $budget) * 100" | bc)
+    local total_bar_pct="$total_pct_budget"
+    if (( $(echo "$total_pct_budget > 100" | bc -l 2>/dev/null) )); then
+        total_bar_pct="100"
+    fi
+    local total_bar_budget
+    total_bar_budget=$(create_bar "$total_bar_pct")
+    printf "  ${BOLD}%-40s${NC} ${total_color}${BOLD}%12.2f${NC} %6.1f%%  ${BLUE}%s${NC}  %6.1f%%  ${BLUE}%s${NC}\n" "TOTAL" "$total_cost" "100.0" "$(create_bar 100)" "$total_pct_budget" "$total_bar_budget"
 }
 
 display_forecast() {
@@ -523,33 +553,12 @@ display_forecast() {
         return
     fi
     
-    local forecast_amount
-    forecast_amount=$(echo "$forecast_json" | python3 -c "
-import sys
-import json
-data = json.load(sys.stdin)
-total = data.get('Total', {})
-amount = total.get('Amount', '0')
-print(f'{float(amount):.2f}')
-" 2>/dev/null)
-    
-    local prediction_low
-    prediction_low=$(echo "$forecast_json" | python3 -c "
-import sys
-import json
-data = json.load(sys.stdin)
-pi = data.get('Total', {}).get('PredictionIntervalLowerBound', '0')
-print(f'{float(pi) if pi else 0:.2f}')
-" 2>/dev/null)
-    
-    local prediction_high
-    prediction_high=$(echo "$forecast_json" | python3 -c "
-import sys
-import json
-data = json.load(sys.stdin)
-pi = data.get('Total', {}).get('PredictionIntervalUpperBound', '0')
-print(f'{float(pi) if pi else 0:.2f}')
-" 2>/dev/null)
+    local forecast_output
+    forecast_output=$(echo "$forecast_json" | python3 "$SCRIPT_DIR/forecast.py" 2>/dev/null)
+    local forecast_amount prediction_low prediction_high
+    forecast_amount=$(echo "$forecast_output" | sed -n '1p')
+    prediction_low=$(echo "$forecast_output" | sed -n '2p')
+    prediction_high=$(echo "$forecast_output" | sed -n '3p')
     
     echo ""
     echo -e "  ${BOLD}Month-End Forecast:${NC}"
@@ -566,9 +575,11 @@ main() {
     local period="month"
     local show_forecast=false
     local show_ec2_details=true
+    local show_rds_details=true
     local top_n=30
     local custom_profile=""
     local simple_output=false
+    local show_all=false
     
     # No args: show help
     if [[ $# -eq 0 ]]; then
@@ -622,6 +633,14 @@ main() {
                 show_ec2_details=false
                 shift
                 ;;
+            --no-rds)
+                show_rds_details=false
+                shift
+                ;;
+            --show-all)
+                show_all=true
+                shift
+                ;;
             -t|--top)
                 top_n="$2"
                 shift 2
@@ -659,7 +678,7 @@ main() {
         profile=$(get_current_profile)
     fi
     
-    echo -e "\n${BOLD}${CYAN}☁ AWS Billing Dashboard${NC}"
+    echo -e "\n${BOLD}${CYAN} AWS Billing Dashboard${NC}"
     echo ""
     
     echo -e "  ${BOLD}Profile:${NC}     ${YELLOW}$profile${NC}"
@@ -676,9 +695,10 @@ main() {
     
     IFS='|' read -r account_id account_alias <<< "$account_info"
     echo -e "  ${BOLD}Account:${NC}     ${WHITE}$account_id${NC}"
-    if [[ -n "$account_alias" ]]; then
-        echo -e "  ${BOLD}Alias:${NC}       ${CYAN}$account_alias${NC}"
-    fi
+
+    local budget
+    budget=$(get_budget_for_profile "$profile")
+    echo -e "  ${BOLD}Budget:${NC}      \$${budget}"
     
     # Calculate date range
     local dates
@@ -699,7 +719,7 @@ main() {
         exit 1
     fi
     
-    display_costs "$cost_data" "$top_n" "$start_date" "$end_date" "$show_ec2_details"
+    display_costs "$cost_data" "$top_n" "$start_date" "$end_date" "$show_ec2_details" "$profile" "$show_all" "$show_rds_details"
     
     # Show forecast if requested
     if [[ "$show_forecast" == true ]]; then
