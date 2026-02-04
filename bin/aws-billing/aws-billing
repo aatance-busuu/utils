@@ -548,7 +548,7 @@ display_costs() {
 
     if [[ -n "$threshold" ]] && [[ "$threshold" -gt 0 ]] && [[ -n "$total_pct_budget" ]]; then
         if (( $(echo "$total_pct_budget >= $threshold" | bc -l 2>/dev/null) )); then
-            echo "\n${YELLOW}WARNING:${NC} exceeded ${threshold}% of the budget (current: ${total_pct_budget}%)" >&2
+            echo -e "\n${YELLOW}WARNING:${NC} exceeded ${threshold}% of the budget" >&2
         fi
     fi
 }
